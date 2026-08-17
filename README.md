@@ -109,7 +109,7 @@ ly (用户在 TTY 输用户名/密码后,选中 "Y5")
 ```nix
 services.displayManager.autoLogin.enable = true;
 services.displayManager.autoLogin.user = "<你的用户名>";
-services.displayManager.defaultSession = "y5";   # 模块已默认设为 "y5"
+services.displayManager.defaultSession = "y5";   # Nourish-only + GDM 时建议明说默认(避 GDM 50 环)
 ```
 
 > **注意**:ly 在 SELinux 发行版(Fedora、openSUSE)上偶有会话启动问题,见
@@ -186,7 +186,7 @@ vulkaninfo | head -40          # 模块已把 vulkan-tools 加进 PATH
 | --- | --- |
 | `environment.systemPackages` | 加上合成器 + `xwayland` + `vulkan-tools`(让 `vulkaninfo` 在 PATH 里方便首检 GPU);`enableVulkanValidation` 开启时再加 `vulkan-validation-layers` |
 | `services.displayManager.sessionPackages` | 注册 `wayland-sessions/y5.desktop`,让 GDM/SDDM/ly 能列出 "Y5" 会话。包带 `passthru.providedSessions = [ "y5" ]`,这是 nixpkgs `sessionData.desktops` 聚合 derivation 的硬性要求 |
-| `services.displayManager.defaultSession` | 钉死为 `"y5"`,免得只有 nourish 的机器开机又跳回 `gnome-session`(GDM 50 脚坑;niri.nix 用的同一个补丁) |
+| `services.displayManager.sessionPackages` | 注册 `wayland-sessions/y5.desktop`,GDM/SDDM/ly 能列出 "Y5" 会话。包带 `passthru.providedSessions = [ "y5" ]`,这是 nixpkgs `sessionData.desktops` 聚合 derivation 的硬性要求。**不钉 `defaultSession`**(与 hyprland 一致),从而能和 `programs.niri` 等共存不撞;Nourish-only + GDM 时自己设 `defaultSession = "y5"` 防 GDM 循环 |
 | `systemd.packages` + `systemd.user.services.y5` | `restartIfChanged=false`(重启会杀 GUI);`enableDefaultPath=false` 避免会话封装的 PATH 被 NixOS 默认 unit 的 `Environment="PATH=coreutils:…"` 踩面目 |
 | `xdg.portal.enable` + `extraPortals` | `xdg-desktop-portal-gtk` + `xdg-desktop-portal-gnome` |
 | `xdg.portal.config.nourish` | 路由标准实现:`default=[gnome gtk]`、`Access→gtk`、`FileChooser→gtk`(无 nautilus 依赖)、`Notification→gtk`、`Secret→gnome-keyring`。以 `XDG_CURRENT_DESKTOP=Y5Compositor`(会话封装设的)为键 |
@@ -291,7 +291,7 @@ nixos/
 ## 已验证的状态
 
 - **结构**:`nix flake check --no-build` → `all checks passed!`(packages、devShells、formatter、两个 NixOS module、overlay 全部 eval 通过)。
-- **NixOS 模块**:`nixosSystem { modules=[nourish]; programs.nourish.enable=true; services.displayManager.ly.enable=true; }` 评估通过,每个选项都 resolve——`defaultSession="y5"`、portal config、PAM `y5-lock` 服务、`hardware.graphics`、xwayland、polkit、keyring 全部经真实 module-system eval 断言通过。
+- **NixOS 模块**:`nixosSystem { modules=[nourish]; programs.nourish.enable=true; services.displayManager.ly.enable=true; }` 评估通过,每个选项都 resolve——`sessionPackages=[y5-compositor]`、portal config、PAM `y5-lock` 服务、`hardware.graphics`、xwayland、polkit、keyring 全部经真实 module-system eval 断言通过。与 `programs.niri` 同开验证了**不撞 `defaultSession`**(改成 hyprland 风格:只注册会话、不钉默认)。
 - **ly 启动链**:经 ly C 源码 (`src/auth.zig`) + nixpkgs `ly.nix` + nixpkgs `xsession-wrapper` 三方验对——`ly` 调 `setup_cmd=sessionData.wrapper` 再 exec `y5.desktop` 的 `Exec=`(我们的 `y5-session` 封装),后者播种 settings.json、导出 `XDG_CURRENT_DESKTOP=Y5Compositor`、exec 合成器。
 - **源 FOD**:`fetchFromGitHub` 哈希与 `nix-prefetch-url` 一致(`sha256-FldDOOO+JLyFjW6zaJa7FTJWA+33qiox9HlNbATLhTQ=`)。
 - **Cargo.lock**:`importCargoLock` 接受(返回有效 cargo-vendor-dir);无 `git+` 源。

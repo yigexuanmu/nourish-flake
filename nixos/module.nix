@@ -12,8 +12,11 @@
 #   • environment.systemPackages  ← the compositor + polkit agent + xwayland +
 #     vulkan-tools (so `vulkaninfo` is on PATH for first-line GPU diagnostics).
 #   • services.displayManager.sessionPackages  ← our wayland-sessions .desktop so
-#     GDM/SDDM offer the "Y5" session; defaultSession pinned to "y5" so a
-#     Nourish-only box does not loop back to gnome-session (same fix niri.nix).
+#     GDM/SDDM/ly offer the "Y5" session. We register only (like hyprland/sway —
+#     no defaultSession), so this flake coexists with programs.niri etc. without
+#     locking defaultSession. On a Nourish-only box using GDM 50, set
+#     `services.displayManager.defaultSession = "y5"` yourself to avoid GDM
+#     looping back to the non-installed gnome-session.
 #   • systemd.packages  ← packages carrying user units get a drop-in; we set
 #     `restartIfChanged = false` on the session (restarting kills the GUI).
 #   • xdg.portal  ← enable + extraPortals (gnome+gtk) + a `nourish` config block
@@ -106,10 +109,16 @@ in
         ++ lib.optional cfg.enableVulkanValidation pkgs.vulkan-validation-layers;
 
         # ── Display manager picks us up as a session ─────────────────────────
+        # Register only, like nixpkgs's hyprland/sway/wayfire modules do: we add
+        # ourselves to the session list so GDM/SDDM/ly offer "Y5", but we do NOT
+        # pin `services.displayManager.defaultSession`. Pinning it would collide
+        # with any other compositor that also pins (nixpkgs's `programs.niri`
+        # does `mkDefault "niri"`, and two `mkDefault`s of different values
+        # hard-fail the build). Leaving it unset means: on a multi-desktop box,
+        # the user picks at the login screen (or sets defaultSession themselves);
+        # on a Nourish-ONLY box using GDM 50, set `defaultSession = "y5"` in your
+        # config to avoid GDM looping back to the non-installed gnome-session.
         services.displayManager.sessionPackages = [ cfg.package ];
-        # GDM 50 falls back to "gnome-session" when nothing pins a session;
-        # pin Y5 so a Nourish-only box does not loop back (same fix niri.nix).
-        services.displayManager.defaultSession = lib.mkDefault "y5";
 
         # ── systemd: restarting the session kills the GUI ───────────────────
         systemd.packages = [ cfg.package ];
