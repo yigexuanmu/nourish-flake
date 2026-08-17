@@ -1,0 +1,11 @@
+# Nix
+result
+result-*
+.direnv/
+
+# Editor
+*.swp
+*~
+
+# Probe/scratch (not part of repo, but in case)
+nourish-probe

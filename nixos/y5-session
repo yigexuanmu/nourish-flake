@@ -1,0 +1,49 @@
+#!/usr/bin/env sh
+# nourish-session — login-session wrapper for the y5 compositor.
+#
+# Roles:
+#   1. seed ~/.config/y5.compositor/settings.json on first run (the compositor
+#      panics if the file is missing — it carries every required field), seeded
+#      from the package's Vulkan-default settings so a fresh login Just Works.
+#   2. scrub WAYLAND_DISPLAY/DISPLAY leaked from a previous host session, exactly
+#      like the compositor's MAIN() does for the native backend — done here too so
+#      the FIRST connect (the Vulkan instance enumerating physical devices) does not
+#      bind to a stale inherited socket.
+#   3. export XDG_CURRENT_DESKTOP / XDG_SESSION_TYPE so xdg-desktop-portal picks
+#      our `nourish` portal config and applications know they are on Wayland.
+#   4. exec the compositor. Nothing here is privileged; run as the login user.
+#
+# This wrapper is emitted as a Nix store script with paths substituted in by the
+# derivation (see package.nix), so it never hardcodes /nix/store paths itself.
+set -eu
+
+# --- defaults, substituted in by the package derivation ---------------------
+COMPOSITOR="@compositor@"          # /nix/store/...-y5-compositor/bin/y5.compositor
+DEFAULT_SETTINGS="@defaultSettings@" # /nix/store/.../default-settings.json
+DESKTOP_NAME="Y5Compositor"
+
+# --- 1. seed settings.json -------------------------------------------------
+# Resolves $XDG_CONFIG_HOME, falling back to $HOME/.config — kept in lockstep
+# with the compositor's config.base::resolve_path().
+config_root="${XDG_CONFIG_HOME:-$HOME/.config}"
+settings_dir="$config_root/y5.compositor"
+settings_file="$settings_dir/settings.json"
+if [ ! -f "$settings_file" ]; then
+    mkdir -p "$settings_dir"
+    cp "$DEFAULT_SETTINGS" "$settings_file"
+    chmod 600 "$settings_file"
+    echo "nourish-session: seeded $settings_file (Vulkan defaults)" >&2
+fi
+
+# --- 2. scrub inherited Wayland/X sockets ----------------------------------
+# The native-session backend re-exports its own WAYLAND_DISPLAY once it has one.
+unset WAYLAND_DISPLAY DISPLAY
+
+# --- 3. portal/desktop identity -------------------------------------------
+export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-$DESKTOP_NAME}"
+export XDG_SESSION_DESKTOP="${XDG_SESSION_DESKTOP:-$DESKTOP_NAME}"
+export XDG_SESSION_TYPE="wayland"
+
+# --- 4. hand off -----------------------------------------------------------
+# `exec` so the compositor PID is what the display manager tracks and SIGTERM-s.
+exec "$COMPOSITOR" "$@"

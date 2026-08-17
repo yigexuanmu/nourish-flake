@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Y5 (Nourish)
+Comment=Nourish — a Vulkan-first Wayland compositor with an infinite, zoomable canvas
+Exec=@sessionBin@
+DesktopNames=Y5Compositor
+Categories=System

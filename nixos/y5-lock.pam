@@ -1,0 +1,13 @@
+# PAM service for the y5 lock screen.
+#
+# The compositor's lock interface calls pam_start("y5-lock", username, ...) — a
+# lock-screen AUTHENTICATION service (verifying the user before unlocking), not a
+# login/session service. Model it on nixos's generic `login` + the swaylock
+# pattern: use pam_unix for password auth, pam_unix's `likeauth` so sudo-style
+# re-auth works for the logged-in user, and pam_gnome_keyring to unlock the
+# keyring on the way through if gnome-keyring is enabled in the system.
+
+auth      include       login
+account   include       login
+password  include       login
+session   include       login
