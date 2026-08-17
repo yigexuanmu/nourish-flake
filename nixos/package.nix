@@ -55,6 +55,14 @@
   vulkan-headers,
   vulkan-tools,
 
+  # xwayland-satellite (nourish's forked variant — see prepare.sh step 5):
+  # both for the satellite binary and for the satellite `.service` at install
+  # (it hardcodes `/usr/bin/xwayland-satellite` and `/bin/sh`; we substitute
+  # both to Nix store paths).
+  libxcb,
+  xcb-util-cursor,
+  bash,
+
   src,
   version,
   cargoLock ? ../Cargo.lock,
@@ -109,6 +117,90 @@ let
     libgbm
     libdisplay-info
   ];
+
+  # ─── xwayland-satellite (nourish's forked v0.8.1 + HiDPI/popup-fix patch) ──
+  # The satellite runs as a systemd user unit (After/WantedBy=
+  # graphical-session.target) and spawns the system Xwayland in rootless mode,
+  # so X11 apps get transparently embedded in the y5 Wayland session. Upstream
+  # ships it as a SEPARATE cargo workspace at
+  # `compositor.installer/component/xwayland-satellite/xwayland-fixes/` with
+  # its OWN `Cargo.lock` (≈140 crates, no git sources) and builds it as a
+  # distinct `cargo build` (see `prepare.sh` step 5). We mirror that here with
+  # a separate `buildRustPackage` derivation, then bundle its outputs into the
+  # main compositor package's postInstall so `programs.nourish.enable = true`
+  # brings up the whole X11 stack from one package.
+  xwaylandSatellite = rustPlatform.buildRustPackage {
+    pname = "y5-xwayland-satellite";
+    inherit version;
+    # Just take the satellite's sub-tree of the SAME upstream src — it is its
+    # own self-contained cargo workspace and cares nothing about the compositor
+    # manifests generated up above.
+    src = "${src}/compositor.installer/component/xwayland-satellite/xwayland-fixes";
+    cargoLock = {
+      lockFile = "${src}/compositor.installer/component/xwayland-satellite/xwayland-fixes/Cargo.lock";
+      # No git deps in this lockfile either (verified: zero `git+` source
+      # entries) → `outputHashes` empty is correct.
+    };
+    buildType = "release";
+    nativeBuildInputs = [
+      pkg-config
+      rustPlatform.bindgenHook
+    ];
+    buildInputs = [
+      libxcb
+      xcb-util-cursor
+      wayland
+      wayland-protocols
+      systemd # sd-notify symbols (libsystemd) when the `systemd` cargo feature
+              # is on; harmless when off.
+    ];
+
+    # The satellite's `build.rs` calls `vergen-gitcl` to embed `git describe`
+    # into the binary. A `fetchFromGitHub` tarball has no `.git` and the
+    # emitter errors out. Replace it with a no-op that emits the sentinel
+    # `VERGEN_IDEMPOTENT_OUTPUT`: `src/lib.rs::version()` handles exactly this
+    # case (line 102) by falling back to `CARGO_PKG_VERSION` (= "0.8.1"). This
+    # matches the upstream tarball-without-git invocation path.
+    postPatch = ''
+      echo 'fn main() { println!("cargo:rustc-env=VERGEN_GIT_DESCRIBE=VERGEN_IDEMPOTENT_OUTPUT"); }' > build.rs
+    '';
+
+    postInstall = ''
+      # Install the systemd user unit author wrote (`xwayland.service` at the
+      # workspace root — the `resources/xwayland-satellite.service` file is the
+      # upstream unpatched satellite variant; we want the y5-patched one).
+      install -Dm644 xwayland.service \
+        $out/lib/systemd/user/xwayland-satellite.service
+
+      # Fix the two hardcoded FHS paths the unit assumes:
+      #   /usr/bin/xwayland-satellite     → this derivation's binary
+      #   /bin/sh                         → Nix store bash (NixOS has no /bin/sh)
+      substituteInPlace $out/lib/systemd/user/xwayland-satellite.service \
+        --replace-fail "/usr/bin/xwayland-satellite" "$out/bin/xwayland-satellite" \
+        --replace-fail "/bin/sh" "${bash}/bin/sh"
+
+      # Satellite spawns `Xwayland` by relative name (Command::new("Xwayland"))
+      # and goes through $PATH. NixOS user units don't inherit a session PATH,
+      # so the 'Xwayland' binary added by `programs.xwayland.enable` may not be
+      # seen. Inject an explicit `Environment=PATH=` listing the standard
+      # NixOS run-time binary dirs (Xwayland lives in /run/current-system/sw/bin
+      # once `programs.xwayland.enable` is on).
+      sed -i "/^\[Service\]/a Environment=PATH=/run/wrappers/bin:/run/current-system/sw/bin:$out/bin" \
+        $out/lib/systemd/user/xwayland-satellite.service
+    '';
+
+    # testwl dep needs a running wayland compositor — skip.
+    doCheck = false;
+
+    meta = {
+      description = "nourish's forked xwayland-satellite (y5 X11 compatibility bridge)";
+      homepage = "https://github.com/Supreeeme/xwayland-satellite";
+      license = lib.licenses.gpl2Only;
+      platforms = lib.platforms.linux;
+      badPlatforms = lib.platforms.darwin;
+      hydra.skip = true;
+    };
+  };
 in
 rustPlatform.buildRustPackage {
   pname = "y5-compositor";
@@ -246,6 +338,33 @@ EOF_NISH
     wrapProgram $out/bin/y5.compositor \
       --prefix LD_LIBRARY_PATH : "${runtimeLibs}" \
       --prefix PATH : "${lib.makeBinPath [ vulkan-tools ]}"
+
+    # ── Bring along the satellite binary + its systemd user unit (mirrors ─────
+    # upstream `prepare.sh` step 5): every y5 session needs xwayland-satellite
+    # in PATH for X11 apps to work, and the user unit under graphical-session.
+    # Installing it under THIS package means `systemd.packages = [cfg.package]`
+    # in the NixOS module picks up BOTH the satellite unit and y5-service/
+    # shutdown target in one place.
+    install -Dm755 ${xwaylandSatellite}/bin/xwayland-satellite \
+      $out/bin/xwayland-satellite
+    install -Dm644 \
+      ${xwaylandSatellite}/lib/systemd/user/xwayland-satellite.service \
+      $out/lib/systemd/user/xwayland-satellite.service
+
+    # ── The main compositor systemd user unit (y5.service) + shutdown target ──
+    # Upstream ships no such unit — they assume the distro's DM directly exec's
+    # the compositor. That model doesn't get systemd user units to start (no
+    # graphical-session.target gets pulled in, so the satellite never rises).
+    # We fill the gap the same way the `niri` flake ships its own `niri.service`:
+    # `BindsTo=graphical-session.target` so the satellite (After=…ạt.arget)
+    # chains up correctly. We put the compositor under this unit so the session
+    # wrapper can `systemctl --user --wait start y5.service`.
+    install -Dm644 ${./y5.service} $out/lib/systemd/user/y5.service
+    substituteInPlace $out/lib/systemd/user/y5.service \
+      --replace-fail "@compositor@" "$out/bin/y5.compositor"
+
+    install -Dm644 ${./y5-shutdown.target} \
+      $out/lib/systemd/user/y5-shutdown.target
   '';
 
   # The native backend needs a real DRM device to even start, so don't run

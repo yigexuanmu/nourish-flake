@@ -17,8 +17,14 @@
 #     locking defaultSession. On a Nourish-only box using GDM 50, set
 #     `services.displayManager.defaultSession = "y5"` yourself to avoid GDM
 #     looping back to the non-installed gnome-session.
-#   • systemd.packages  ← packages carrying user units get a drop-in; we set
-#     `restartIfChanged = false` on the session (restarting kills the GUI).
+#   • systemd.packages  ← installing the y5.service + y5-shutdown.target +
+#     xwayland-satellite.service user units from `cfg.package` (these ship in
+#     `lib/systemd/user/`). The satellite additionally sets
+#     `wantedBy = ["graphical-session.target"]` so it auto-starts when the
+#     compositor pulls up that target (canonical NixOS pattern, see
+#     `nixpkgs/nixos/modules/services/system/systemd-lock-handler.nix`).
+#     `restartIfChanged = false` on both: a `rebuild switch` won't kill an
+#     active login session.
 #   • xdg.portal  ← enable + extraPortals (gnome+gtk) + a `nourish` config block
 #     so org.freedesktop.impl.portal.{Access,FileChooser,Notification,Secret}
 #     route correctly. (The single biggest "behind the scenes" lift when adding
@@ -105,6 +111,14 @@ in
           pkgs.xwayland
           # `vulkaninfo` is one keystroke away for "is my Vulkan stack working?"
           pkgs.vulkan-tools
+          # X11 client libs that the xwayland-satellite side of the session
+          # needs on the system PATH so its Xwayland's PCI-surface finds them
+          # via `/run/current-system/sw/lib` (the satellite binary itself
+          # already links them via its own RPATH from `buildInputs` in
+          # package.nix — this is for X11 client apps that look at system lib
+          # paths).
+          pkgs.libxcb
+          pkgs.xcb-util-cursor
         ]
         ++ lib.optional cfg.enableVulkanValidation pkgs.vulkan-validation-layers;
 
@@ -120,13 +134,40 @@ in
         # config to avoid GDM looping back to the non-installed gnome-session.
         services.displayManager.sessionPackages = [ cfg.package ];
 
-        # ── systemd: restarting the session kills the GUI ───────────────────
+        # ── systemd: unit files ship in `cfg.package` ───────────────────────
+        # `systemd.packages` installs the package's `lib/systemd/user/` contents
+        # (y5.service, y5-shutdown.target, xwayland-satellite.service — all
+        # written by package.nix) into the user-unit dir, where the user session
+        # manager picks them up at next login. It does NOT, by itself, enable
+        # them — so for the satellite we ALSO set `wantedBy` here. The SDL
+        # pattern (`systemd-lock-handler.nix` in nixpkgs) is precisely
+        # `systemd.packages = [pkg]` + `systemd.user.services.X.wantedBy = …`.
+        #
+        # y5.service is NOT `wantedBy` anything — it is started explicitly by
+        # the y5-session wrapper (`systemctl --user --wait start y5.service`).
+        # Setting `restartIfChanged = false` on both units means a `nixos-rebuild
+        # switch` while logged in will NOT tear down an active session — the
+        # user gets the new binaries on next login.
         systemd.packages = [ cfg.package ];
         systemd.user.services.y5 = {
           restartIfChanged = false;
-          # NixOS's default user-unit Environment="PATH=coreutils:…" would
-          # clobber the session-wrapped PATH; turn the drop-in off (niri.nix
-          # uses `enableDefaultPath = false` for the same reason).
+          # NixOS's default user-unit Environment="PATH=…" would clobber the
+          # session-wrapped PATH; turn the drop-in off (niri.nix uses
+          # `enableDefaultPath = false` for the same reason).
+          enableDefaultPath = false;
+        };
+        systemd.user.services.xwayland-satellite = {
+          # Pull the satellite up automatically when graphical-session.target
+          # rises — i.e. when y5.service (which `BindsTo=graphical-session.target`)
+          # starts. The author's `xwayland.service` already declares
+          # [Install] WantedBy=graphical-session.target in its unit file, but
+          # `systemctl --user enable` is never called under NixOS — this NixOS
+          # option explicitly creates the `.wants/` softlink for us.
+          wantedBy = [ "graphical-session.target" ];
+          restartIfChanged = false;
+          # Same rationale as y5.service — leave PATH to the unit's own
+          # Environment= line (set in package.nix with the run-wrappers +
+          # current-system path so it finds the Xwayland binary).
           enableDefaultPath = false;
         };
 

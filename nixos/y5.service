@@ -1,0 +1,28 @@
+[Unit]
+Description=y5 compositor (Nourish)
+Documentation=https://github.com/y5-snowies/nourish
+BindsTo=graphical-session.target
+Before=graphical-session.target
+Wants=graphical-session-pre.target
+After=graphical-session-pre.target
+
+Wants=xdg-desktop-autostart.target
+Before=xdg-desktop-autostart.target
+
+[Service]
+Slice=session.slice
+Type=simple
+
+# @compositor@ is substituted at build time to the Nix store path of the
+# wrapped y5.compositor binary. The wrapper already sets LD_LIBRARY_PATH +
+# adds vulkan-tools to PATH, so the compositor's dlopen'd libs resolve.
+ExecStart=@compositor@
+
+# Failures shouldn't restart a session an unbounded number of times.
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=5s
+KillMode=mixed
+
+[X-ForkWait]
+TimeoutSec=0

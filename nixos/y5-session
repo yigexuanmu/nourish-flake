@@ -1,28 +1,34 @@
-#!/usr/bin/env sh
+#!/usr/bin/env bash
 # nourish-session — login-session wrapper for the y5 compositor.
 #
-# Roles:
-#   1. seed ~/.config/y5.compositor/settings.json on first run (the compositor
-#      panics if the file is missing — it carries every required field), seeded
-#      from the package's Vulkan-default settings so a fresh login Just Works.
-#   2. scrub WAYLAND_DISPLAY/DISPLAY leaked from a previous host session, exactly
-#      like the compositor's MAIN() does for the native backend — done here too so
-#      the FIRST connect (the Vulkan instance enumerating physical devices) does not
-#      bind to a stale inherited socket.
-#   3. export XDG_CURRENT_DESKTOP / XDG_SESSION_TYPE so xdg-desktop-portal picks
-#      our `nourish` portal config and applications know they are on Wayland.
-#   4. exec the compositor. Nothing here is privileged; run as the login user.
+# Why this script exists (the four things it does):
+#   1. seed ~/.config/y5.compositor/settings.json on first run — the compositor
+#      panics if the file is missing, because every required field lives in
+#      there. Seeded from the package's Vulkan-default settings so a fresh
+#      login Just Works.
+#   2. scrub WAYLAND_DISPLAY/DISPLAY that may have leaked from a previous host
+#      session so we don't bind a stale inherited socket.
+#   3. export XDG_CURRENT_DESKTOP / XDG_SESSION_TYPE so xdg-desktop-portal
+#      picks our `nourish` portal config and apps know they are on Wayland.
+#   4. hand off to the compositor — but under systemd-user if available. That
+#      handoff is the important bit for X11:
+#         systemctl --user --wait start y5.service
+#      because y5.service has BindsTo=graphical-session.target, starting it
+#      pulls up graphical-session.target, which has WantedBy=xwayland-
+#      satellite.service (installed by the same package). So X11 apps "just
+#      work" with no manual spawning. Mirrors upstream `niri-session`.
 #
-# This wrapper is emitted as a Nix store script with paths substituted in by the
-# derivation (see package.nix), so it never hardcodes /nix/store paths itself.
+# Without step 4, or when there is no systemd user manager, fall through to
+# `exec $COMPOSITOR` — the DM tracks the process and SIGTERM's it on logout.
+
 set -eu
 
-# --- defaults, substituted in by the package derivation ---------------------
-COMPOSITOR="@compositor@"          # /nix/store/...-y5-compositor/bin/y5.compositor
-DEFAULT_SETTINGS="@defaultSettings@" # /nix/store/.../default-settings.json
+# --- substituted in by nixos/package.nix (paths stay relocatable) ----------
+COMPOSITOR="@compositor@"
+DEFAULT_SETTINGS="@defaultSettings@"
 DESKTOP_NAME="Y5Compositor"
 
-# --- 1. seed settings.json -------------------------------------------------
+# ─── 1. seed settings.json ──────────────────────────────────────────────
 # Resolves $XDG_CONFIG_HOME, falling back to $HOME/.config — kept in lockstep
 # with the compositor's config.base::resolve_path().
 config_root="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -35,15 +41,76 @@ if [ ! -f "$settings_file" ]; then
     echo "nourish-session: seeded $settings_file (Vulkan defaults)" >&2
 fi
 
-# --- 2. scrub inherited Wayland/X sockets ----------------------------------
-# The native-session backend re-exports its own WAYLAND_DISPLAY once it has one.
+# ─── 2. scrub inherited Wayland/X sockets ──────────────────────────────
+# The native-session backend re-exports its own WAYLAND_DISPLAY once it has
+# one; we just don't want a stale one bound by the FIRST connect.
 unset WAYLAND_DISPLAY DISPLAY
 
-# --- 3. portal/desktop identity -------------------------------------------
+# ─── 3. portal / desktop identity ──────────────────────────────────────
+# Keep whatever the DM already set (GDM derives DesktopNames= from the .desktop
+# file); only fill in sensible defaults if missing.
 export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-$DESKTOP_NAME}"
 export XDG_SESSION_DESKTOP="${XDG_SESSION_DESKTOP:-$DESKTOP_NAME}"
 export XDG_SESSION_TYPE="wayland"
 
-# --- 4. hand off -----------------------------------------------------------
-# `exec` so the compositor PID is what the display manager tracks and SIGTERM-s.
+# ─── 4. hand off ─────────────────────────────────────────────────────────
+# If we are already running INSIDE a systemd user service (e.g. when
+# y5.service itself ran this script), systemd already set the env, just exec
+# the compositor. Detect: SYSTEMD_EXEC_PID == $$ means we were ExecStart'd by
+# systemd, MANAGERPID present means a systemd --user is running.
+if [ -n "${MANAGERPID:-}" ] && [ "${SYSTEMD_EXEC_PID:-}" = "$$" ]; then
+    exec "$COMPOSITOR" "$@"
+fi
+
+# systemd-user session path.
+if command -v systemctl >/dev/null 2>&1 \
+   && systemctl --user >/dev/null 2>&1 \
+   && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+
+    # Reset failed units from a crashed previous session — otherwise the
+    # subsequent `start y5.service` may be blocked.
+    systemctl --user reset-failed || true
+
+    # Push our desktop identity into the systemd user env so the compositor —
+    # which y5.service will fork — and any WantedBy=graphical-session target
+    # child (xwayland-satellite) sees the right XDG_CURRENT_DESKTOP. (systemd
+    # user manager already has DBUS_SESSION_BUS_ADDRESS / XDG_RUNTIME_DIR from
+    # its service-manager startup; no need to re-import those.)
+    systemctl --user import-environment \
+        XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE || true
+
+    # Mirror into D-Bus activation env too — some clients still go through the
+    # legacy dbus-1 activation path rather than SystemdService=.
+    if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+        dbus-update-activation-environment --all \
+            2>/dev/null || true
+    fi
+
+    # Start the compositor. y5.service is `BindsTo=graphical-session.target`,
+    # so this pulls up that target too, which in turn auto-starts
+    # xwayland-satellite.service (After / WantedBy graphical-session.target).
+    # `--wait` makes the call block until y5.service exits — so this script
+    # effectively detaches the wrapper into "session foreground" for the DM.
+    systemctl --user --wait start y5.service
+
+    # Tear down the rest of the graphical session — anything WantedBy'd into
+    # graphical-session.target (the satellite, autostarted apps, …). Use
+    # `replace-irreversibly` because some autostarting units may have Wants back
+    # to graphical-session, which would block a normal Stop job.
+    systemctl --user start --job-mode=replace-irreversibly y5-shutdown.target \
+        2>/dev/null || true
+
+    # Clean the env vars we imported, matching upstream niri-session.
+    systemctl --user unset-environment \
+        WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE \
+        XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP \
+        2>/dev/null || true
+
+    exit 0
+fi
+
+# Fallback: no systemd user manager (or `--user` not reachable). Just exec the
+# compositor directly — DM / login-manager wrapper tracks the PID from there.
+# X11 applications won't work without systemd-user here (satellite won't be
+# started), but the compositor still runs.
 exec "$COMPOSITOR" "$@"

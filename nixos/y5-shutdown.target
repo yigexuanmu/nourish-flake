@@ -1,0 +1,6 @@
+[Unit]
+Description=Shut down the y5 compositor session
+After=graphical-session.target
+After=graphical-session-pre.target
+Conflicts=graphical-session.target
+Conflicts=graphical-session-pre.target
