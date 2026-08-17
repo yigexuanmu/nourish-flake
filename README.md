@@ -184,16 +184,16 @@ vulkaninfo | head -40          # 模块已把 vulkan-tools 加进 PATH
 
 | 系统旋钮 | 为 nourish 干的事 |
 | --- | --- |
-| `environment.systemPackages` | 加上合成器 + `xwayland` + `vulkan-tools`(让 `vulkaninfo` 在 PATH 里方便首检 GPU);`enableVulkanValidation` 开启时再加 `vulkan-validation-layers` |
-| `services.displayManager.sessionPackages` | 注册 `wayland-sessions/y5.desktop`,让 GDM/SDDM/ly 能列出 "Y5" 会话。包带 `passthru.providedSessions = [ "y5" ]`,这是 nixpkgs `sessionData.desktops` 聚合 derivation 的硬性要求 |
+| `environment.systemPackages` | 合成器 + `xwayland`(二进制)+ `vulkan-tools`(`vulkaninfo` 在 PATH 方便首检 GPU)+ `libxcb` + `xcb-util-cursor`(X11 client lib surface);`enableVulkanValidation` 开启时再加 `vulkan-validation-layers` |
 | `services.displayManager.sessionPackages` | 注册 `wayland-sessions/y5.desktop`,GDM/SDDM/ly 能列出 "Y5" 会话。包带 `passthru.providedSessions = [ "y5" ]`,这是 nixpkgs `sessionData.desktops` 聚合 derivation 的硬性要求。**不钉 `defaultSession`**(与 hyprland 一致),从而能和 `programs.niri` 等共存不撞;Nourish-only + GDM 时自己设 `defaultSession = "y5"` 防 GDM 循环 |
-| `systemd.packages` + `systemd.user.services.y5` | `restartIfChanged=false`(重启会杀 GUI);`enableDefaultPath=false` 避免会话封装的 PATH 被 NixOS 默认 unit 的 `Environment="PATH=coreutils:…"` 踩面目 |
+| `systemd.packages` | 把包里 `lib/systemd/user/` 的三个 unit 装进系统:`y5.service`(主合成器,`BindsTo=graphical-session.target`,由会话封装 `systemctl --user --wait start` 拉起)、`y5-shutdown.target`(退出时撕掉 graphical-session.target)、`xwayland-satellite.service`(X11 桥,作者的 y5-fork)。canonical nixpkgs 模式(见 `services/system/systemd-lock-handler.nix`) |
+| `systemd.user.services.xwayland-satellite` | `wantedBy = [graphical-session.target]`——会话 target 一拉起 satellite 自动跟起,所以「X11 应用能用」是零配置。`y5.service` 与 satellite 均设 `restartIfChanged=false`(rebuild switch 不杀活跃会话)、`enableDefaultPath=false` 防 NixOS 默认 unit 的 `Environment="PATH=…"` 踩会话封装的 PATH |
 | `xdg.portal.enable` + `extraPortals` | `xdg-desktop-portal-gtk` + `xdg-desktop-portal-gnome` |
 | `xdg.portal.config.nourish` | 路由标准实现:`default=[gnome gtk]`、`Access→gtk`、`FileChooser→gtk`(无 nautilus 依赖)、`Notification→gtk`、`Secret→gnome-keyring`。以 `XDG_CURRENT_DESKTOP=Y5Compositor`(会话封装设的)为键 |
 | `security.pam.services.y5-lock` | 合成器锁屏调 `pam_start("y5-lock", …)`;没有这个服务 PAM 走默认路径会**拒绝**解锁 |
 | `security.polkit.enable` | 合成器 `y5-polkit-agent` 对话的 daemon |
 | `hardware.graphics.enable`(+x86 上 `enable32Bit`) | GL(mesa)**以及** Vulkan loader(`libvulkan` + ICDs)——合成器运行时 `dlopen` 这些;没有会在 `vkCreateInstance` 崩 |
-| `programs.xwayland.enable` | 原生 X11 应用支持 |
+| `programs.xwayland.enable` | 装 freedesktop 官方 `Xwayland` 二进制到 system PATH——`xwayland-satellite` 运行时 `Command::new("Xwayland")` spawn 它做 rootless X11。此旋钮**只装二进制不启进程**;真正起 X 桥的是上面那个 `xwayland-satellite.service` user unit |
 | `services.gnome.gnome-keyring.enable` | 背书 portal `Secret` 实现 + 一般秘密存储 |
 
 一切用 `lib.mkDefault` / `lib.mkIf`,所以你有最终决定权——上面每一行都能从自己的 config 覆盖。
@@ -233,6 +233,27 @@ workspace.catalog.json   每个 workspace 根的成员/resolver/links/profiles
 ```
 
 `vk_diag`、GpuAss 等诊断路径要多一个 cargo 特性:`extraBuildFeatures = [ "vulkan-validate" ]`(NixOS 模块也提供了 `programs.nourish.enableVulkanValidation = true` 这个开关)。
+
+### X11:作者 fork 的 xwayland-satellite
+
+nourish 不走 smithay 内置的 rootless Xwayland,而是在 `compositor.installer/component/xwayland-satellite/xwayland-fixes/` 自带一份上游 [xwayland-satellite](https://github.com/Supereeeme/xwayland-satellite) 0.8.1 的 fork,带三个 y5 专属补丁(`--force-scale 1 --ignore-fractional-scale --popup-fix`,后者是为了修 Isaac Sim 的「拖到外部窗口」面板边框崩)。本 flake 照实 mirror:
+
+- `package.nix` 里开一个独立的 `let`-bound `buildRustPackage`(卫星有自己的 `Cargo.lock` ≈ 140 crate、无 git 依赖),把子树 `compositor.installer/component/xwayland-satellite/xwayland-fixes` 当 src。
+- tarball 里没 `.git`,作者的 `build.rs` 用 `vergen-gitcl` 嵌 `git describe` 会失败──所以在 `postPatch` 里把 `build.rs` 替成 no-op 只发 `VERGEN_GIT_DESCRIBE=VERGEN_IDEMPOTENT_OUTPUT`,`src/lib.rs` 里已有这个 sentinel 的 fallback(退到 `CARGO_PKG_VERSION` = 0.8.1)。
+- 作者的 `xwayland.service` 装 `lib/systemd/user/` 里(`substituteInPlace` 修 `/usr/bin/xwayland-satellite` 与 `/bin/sh` 为 Nix store 路径,并注入 `Environment=PATH=/run/wrappers/bin:/run/current-system/sw/bin:…` 让 satellite 找得到系统 `Xwayland`)。
+
+启动链路(这才是「X11 应用能用」的完整路径):
+
+```
+DM 选 y5.desktop → y5-session 封装
+  ├ systemctl --user --wait start y5.service
+  │     ↑ BindsTo=graphical-session.target → 自动拉起该 target
+  │         ↑ xwayland-satellite.service 的 [Install] WantedBy=graphical-session.target
+  │             (module 里设的 wantedBy 生成 .wants 软链)
+  │             ↑ ExecStartPre 等 60s 直到 compositor 把 WAYLAND_DISPLAY 推到 dbus-activation env
+  │             ↑ Command::new("Xwayland") : 12 --force-scale 1 --ignore-fractional-scale --popup-fix
+  └ 退出 → y5-shutdown.target 撕掉 graphical-session.target
+```
 
 ---
 
@@ -278,10 +299,12 @@ cp compositor.kernel/kernel.loader/Cargo.lock <path-to>/nourish-flake/Cargo.lock
 flake.nix                 入口:packages + devShells + nixosModules + overlay
 Cargo.lock                预生成(1494 crate,全 crates.io,default-settings.json     首次登录播种用的 Vulkan-默认 settings.json
 nixos/
-  package.nix             from-source buildRustPackage(postPatch 里跑生成器)
+  package.nix             from-source buildRustPackage(postPatch 里跑生成器);并 build 一个 `let` 子派生编译作者的 xwayland-satellite fork
   module.nix              programs.nourish.*——整张桌面管道
   devshell.nix            镜像 install-deps.sh 的 nix develop shell
-  y5-session              登录会话封装(播种 settings.json、清 WAYLAND_DISPLAY、设 XDG_CURRENT_DESKTOP、exec 合成器)
+  y5-session              登录会话封装(播种 settings.json、清 WAYLAND_DISPLAY、设 XDG_CURRENT_DESKTOP;有 systemd-user 时 `systemctl --user --wait start y5.service`,退时拉 `y5-shutdown.target`;否则 fallback 直 exec 合成器)
+  y5.service              主合成器 user unit(`BindsTo=graphical-session.target`);`@compositor@` 在 package.nix 里被 substitute 成 store bin。拉起后自动带起 satellite
+  y5-shutdown.target      退出时撕掉 graphical-session.target 的 shutdown target
   y5-session.desktop      GDM/SDDM/ly 读的 wayland-sessions 条目
   y5-lock.pam             锁屏 PAM 服务(pam_start "y5-lock")
 ```
@@ -297,3 +320,5 @@ nixos/
 - **Cargo.lock**:`importCargoLock` 接受(返回有效 cargo-vendor-dir);无 `git+` 源。
 - **清单生成**:fresh clone 上跑 `node workspace.generate.js` → 962 个 `Cargo.toml`,`cargo generate-lockfile` 成功(1494 包,ash=0.38.0+1.3.281=Vulkan 1.3.281)。
 - **端到端编译** ✅:用本地等价源树跑通了完整 `nix build .#y5-compositor`——修复了一个只有真编译才会暴露的 bug(cargo-build-hook 的 `CARGO_PROFILE_<TYPE>_STRIP` 不接受连字符 profile 名;改用 `releasefast` 化名)。产物 `y5_compositor` 是 185 MB ELF,正确链接 `libvulkan.so`/`libdrm.so`/`libgbm.so`,`providedSessions = ["y5"]`、session 封装、`y5.desktop` 均已安装入位。
+- **xwayland-satellite 子派生** ✅:作者 fork 的 satellite 作为独立 `buildRustPackage` 成功编译(`--profile release`,115s,140 crate),FOD 子树源在 `compositor.installer/component/xwayland-satellite/xwayland-fixes` 正确切出;独立的 `Cargo.lock` 经 `cargoSetupPostPatchHook` 一致性校验通过(无 git 依赖)。关键的 `build.rs` 在无 `.git` tarball 里的问题以 `postPatch` 替成 no-op 发 `VERGEN_GIT_DESCRIBE=VERGEN_IDEMPOTENT_OUTPUT` sentinel 解决,生成 `src/lib.rs` 退到 `CARGO_PKG_VERSION`=0.8.1 的 fallback 路径。`xwayland.service` 被装入 `$out/lib/systemd/user/xwayland-satellite.service`(nixpkgs 的 hook 把 `lib/systemd/user` 重定位为指向 `share/systemd/user` 的符号链,一套文件原 inode);`substituteInPlace` 把 `/usr/bin/xwayland-satellite` → Nix store bin、`/bin/sh` → Nix store bash,`sed` 注入的 `Environment=PATH=/run/wrappers/bin:/run/current-system/sw/bin:…` 全部落位;三个 y5 专属 flag(`--popup-fix --force-scale 1 --ignore-fractional-scale`)完整保留。
+- **systemd 线联调**:真 `nixosSystem` eval 确认 `systemd.user.services.xwayland-satellite.wantedBy = ["graphical-session.target"]` 进入了模块图(即 compositor 一拉 `y5.service` 自动带起 satellite),`sessionNames=["y5"]`,`sat`/`y5` 均 `restartIfChanged=false`。
