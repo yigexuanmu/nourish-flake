@@ -30,7 +30,7 @@ NixOS 配置(`flake.nix` + `configuration.nix`)为例。
       modules = [
         ./hardware-configuration.nix
         ./configuration.nix
-        nourish-flake.nixosModules.nourish     # 注入 programs.nourish.*
+        inputs.nourish-flake.nixosModules.nourish     # 注入 programs.nourish.*
       ];
     };
   };
