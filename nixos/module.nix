@@ -58,8 +58,8 @@ let
   srcMeta = {
     owner = "y5-snowies";
     repo = "nourish";
-    rev = "1280e12c8c86f890ba6369387ed11f19b91a796d";
-    hash = "sha256-FldDOOO+JLyFjW6zaJa7FTJWA+33qiox9HlNbATLhTQ=";
+    rev = "f28b3d2c90d9d05fafbb0b0cc53965d7577f40b4";
+    hash = "sha256-ZDVEiS/UdpsMDTs8OuG6Lz7hEC77ylbwJ/DL3NI5y9s=";
   };
   version = "1.8.0"; # repo-root VERSION at that rev
 in

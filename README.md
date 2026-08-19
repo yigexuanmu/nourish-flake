@@ -73,8 +73,10 @@ sudo nixos-rebuild switch --flake .#mybox
 
 **4. 重启,在登录界面选 "Y5 (Nourish)" 会话,登录。**
 
-首次登录会自动播种 `~/.config/y5.compositor/settings.json`(Vulkan 默认值)。想改设置,
-编辑该文件即可。
+首次登录会自动播种 `~/.config/y5.compositor/settings.json`(canonical schema-v4
+Vulkan 默认值)。想改设置,`y5.compositor.settings`(交互设置页)或直接编辑该文件
+均可——注意合成器**没有缺省值**:文件中每个字段都必填,删字段/短字段会在启动时
+panic(这也是为什么播种是"整份 canonical 默认文件"而不是部分默认)。
 
 ---
 
@@ -144,6 +146,12 @@ in
 nix build github:yigexuanmu/nourish-flake#y5-compositor
 ./result/bin/y5.compositor   # native 后端需要真实 TTY + DRM 设备
 ```
+
+`y5.compositor` 首次直接运行会自动播种 `~/.config/y5.compositor/settings.json`
+(与登录会话同一份 canonical schema-v4 默认值)——这就是那种"直接跑二进制却因为
+没有 settings 文件而崩溃"的启动 panic 的修复。想交互式改设置,包里还带了
+`y5.compositor.settings`(设置页工具):`y5.compositor.settings --write-default`
+非交互写回 canonical 模板,或直接跑它进菜单。
 
 ---
 
@@ -259,7 +267,7 @@ DM 选 y5.desktop → y5-session 封装
 
 ## 维护:更新钉住的 commit / Cargo.lock
 
-flake 钉一个 commit (`1280e12c…) + 一份匹配的 `./Cargo.lock`。跟进上游:
+flake 钉一个 commit (`f28b3d2c…) + 一份匹配的 `./Cargo.lock`。跟进上游:
 
 ```sh
 NEW=$(git ls-remote https://github.com/y5-snowies/nourish \
@@ -297,11 +305,13 @@ cp compositor.kernel/kernel.loader/Cargo.lock <path-to>/nourish-flake/Cargo.lock
 
 ```
 flake.nix                 入口:packages + devShells + nixosModules + overlay
-Cargo.lock                预生成(1494 crate,全 crates.io,default-settings.json     首次登录播种用的 Vulkan-默认 settings.json
+Cargo.lock                预生成(1494 crate,全 crates.io);importCargoLock 用它派生 vendor FOD
+default-settings.json     首次登录/首次直跑播种用的 canonical schema-v4 settings.json(与上游 default_settings() 一字不差)
 nixos/
-  package.nix             from-source buildRustPackage(postPatch 里跑生成器);并 build 一个 `let` 子派生编译作者的 xwayland-satellite fork
+  package.nix             from-source buildRustPackage(postPatch 里跑生成器);并 build 两个 `let` 子派生:作者 xwayland-satellite fork + 设置页工具 y5.compositor.settings
   module.nix              programs.nourish.*——整张桌面管道
   devshell.nix            镜像 install-deps.sh 的 nix develop shell
+  y5-compositor           DOT-NAME 启动封装(`y5.compositor` 在 PATH 上指向它):直跑时播种 settings.json(幂等,不覆盖已有),再 exec 合成器——修掉「直接跑二进制因缺 settings 文件 panic」的启动 bug
   y5-session              登录会话封装(播种 settings.json、清 WAYLAND_DISPLAY、设 XDG_CURRENT_DESKTOP;有 systemd-user 时 `systemctl --user --wait start y5.service`,退时拉 `y5-shutdown.target`;否则 fallback 直 exec 合成器)
   y5.service              主合成器 user unit(`BindsTo=graphical-session.target`);`@compositor@` 在 package.nix 里被 substitute 成 store bin。拉起后自动带起 satellite
   y5-shutdown.target      退出时撕掉 graphical-session.target 的 shutdown target
@@ -316,9 +326,11 @@ nixos/
 - **结构**:`nix flake check --no-build` → `all checks passed!`(packages、devShells、formatter、两个 NixOS module、overlay 全部 eval 通过)。
 - **NixOS 模块**:`nixosSystem { modules=[nourish]; programs.nourish.enable=true; services.displayManager.ly.enable=true; }` 评估通过,每个选项都 resolve——`sessionPackages=[y5-compositor]`、portal config、PAM `y5-lock` 服务、`hardware.graphics`、xwayland、polkit、keyring 全部经真实 module-system eval 断言通过。与 `programs.niri` 同开验证了**不撞 `defaultSession`**(改成 hyprland 风格:只注册会话、不钉默认)。
 - **ly 启动链**:经 ly C 源码 (`src/auth.zig`) + nixpkgs `ly.nix` + nixpkgs `xsession-wrapper` 三方验对——`ly` 调 `setup_cmd=sessionData.wrapper` 再 exec `y5.desktop` 的 `Exec=`(我们的 `y5-session` 封装),后者播种 settings.json、导出 `XDG_CURRENT_DESKTOP=Y5Compositor`、exec 合成器。
-- **源 FOD**:`fetchFromGitHub` 哈希与 `nix-prefetch-url` 一致(`sha256-FldDOOO+JLyFjW6zaJa7FTJWA+33qiox9HlNbATLhTQ=`)。
+- **源 FOD**:`fetchFromGitHub` 哈希与 `nix-prefetch-url` 一致(`sha256-ZDVEiS/UdpsMDTs8OuG6Lz7hEC77ylbwJ/DL3NI5y9s=`)。
 - **Cargo.lock**:`importCargoLock` 接受(返回有效 cargo-vendor-dir);无 `git+` 源。
 - **清单生成**:fresh clone 上跑 `node workspace.generate.js` → 962 个 `Cargo.toml`,`cargo generate-lockfile` 成功(1494 包,ash=0.38.0+1.3.281=Vulkan 1.3.281)。
 - **端到端编译** ✅:用本地等价源树跑通了完整 `nix build .#y5-compositor`——修复了一个只有真编译才会暴露的 bug(cargo-build-hook 的 `CARGO_PROFILE_<TYPE>_STRIP` 不接受连字符 profile 名;改用 `releasefast` 化名)。产物 `y5_compositor` 是 185 MB ELF,正确链接 `libvulkan.so`/`libdrm.so`/`libgbm.so`,`providedSessions = ["y5"]`、session 封装、`y5.desktop` 均已安装入位。
+- **启动 bug 修复** ✅:`y5.compositor` 现在是以 `nixos/y5-compositor` 封装的 DOT-NAME 启动器(幂等播种 `settings.json`,检测到 `--config-file=` 则跳过)——假 HOME 下 `./result/bin/y5.compositor` 首次直跑即生成 `~/.config/y5.compositor/settings.json`,与打包的 `default-settings.json` 逐字节一致;再跑不覆写。测试确认在传入显式 `--config-file` 时**不**触碰默认位置。
+- **y5.compositor.settings 子派生** ✅:`settingsEditor` 作为独立 `buildRustPackage`(release,`config.base` 同 schema crate,无 bindgen)成功编译;`--write-default` 非交互写出 canonical schema-v4(23 字段全齐),与 `default-settings.json` 一致。注意:该工作区**自带的** `Cargo.lock` 在 f28b3d2c 已与生成目录漂移(serde 1.0.228 vs 生成器钉的 =1.0.229),本 flake 把关:提交了仓库根 `./settings-editor.Cargo.lock`(对照 catalog 重新生成),postPatch 里 `cp` 回写源树再跑一致性校验——不这么做 cargo 会在"failed to select serde =1.0.229"处死掉。
 - **xwayland-satellite 子派生** ✅:作者 fork 的 satellite 作为独立 `buildRustPackage` 成功编译(`--profile release`,115s,140 crate),FOD 子树源在 `compositor.installer/component/xwayland-satellite/xwayland-fixes` 正确切出;独立的 `Cargo.lock` 经 `cargoSetupPostPatchHook` 一致性校验通过(无 git 依赖)。关键的 `build.rs` 在无 `.git` tarball 里的问题以 `postPatch` 替成 no-op 发 `VERGEN_GIT_DESCRIBE=VERGEN_IDEMPOTENT_OUTPUT` sentinel 解决,生成 `src/lib.rs` 退到 `CARGO_PKG_VERSION`=0.8.1 的 fallback 路径。`xwayland.service` 被装入 `$out/lib/systemd/user/xwayland-satellite.service`(nixpkgs 的 hook 把 `lib/systemd/user` 重定位为指向 `share/systemd/user` 的符号链,一套文件原 inode);`substituteInPlace` 把 `/usr/bin/xwayland-satellite` → Nix store bin、`/bin/sh` → Nix store bash,`sed` 注入的 `Environment=PATH=/run/wrappers/bin:/run/current-system/sw/bin:…` 全部落位;三个 y5 专属 flag(`--popup-fix --force-scale 1 --ignore-fractional-scale`)完整保留。
 - **systemd 线联调**:真 `nixosSystem` eval 确认 `systemd.user.services.xwayland-satellite.wantedBy = ["graphical-session.target"]` 进入了模块图(即 compositor 一拉 `y5.service` 自动带起 satellite),`sessionNames=["y5"]`,`sat`/`y5` 均 `restartIfChanged=false`。

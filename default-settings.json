@@ -1,11 +1,13 @@
 {
+  "version": 4,
   "renderer": "vulkan",
-  "renderer_fallback": false,
+  "renderer_fallback": true,
   "renderer_sync": "infence",
   "hdr": false,
   "depth": 8,
-  "vrr": true,
+  "vrr": false,
   "render_node": "/dev/dri/renderD128",
+  "scanout_node": "",
   "desktop_name": "Y5Compositor",
   "log_level": "info,warn,error",
   "vk_diag": "",
@@ -15,7 +17,8 @@
   "capture_refresh_rate_max": 120,
   "capture_background_encoder": "ffmpeg",
   "capture_nvenc_allow_readback_fallback": false,
-  "capture_variable_frame_rate": true,
+  "capture_variable_frame_rate": false,
+  "priority": "realtime",
   "window_client_size_fallback": false,
   "window_subsurface_shrinks": false
 }

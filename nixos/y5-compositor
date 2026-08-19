@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# y5.compositor — direct-launch wrapper for the y5 compositor.
+#
+# Why this script exists:
+#   The compositor has NO defaults: it panics immediately if
+#   ~/.config/y5.compositor/settings.json is missing (or short a field). The
+#   login-session path (`y5-session` → `y5.service`) seeds it from the packaged
+#   defaults before starting, but a DIRECT launch (`nix run`, `./result/bin/
+#   y5.compositor`, calling the binary by hand) never goes through y5-session —
+#   so it hits the exact panic in the README:
+#     cannot read settings file ~/.config/y5.compositor/settings.json …
+#     Create it with `y5.compositor.settings`, or pass --config-file=<path>.
+#   This wrapper closes that gap: it seeds the file (idempotent — never
+#   overwrites an existing one) and then execs the real binary. Reachable via the
+#   same `config.base::resolve_path()` logic the compositor uses.
+
+set -eu
+
+# --- substituted in by nixos/package.nix (paths stay relocatable) ----------
+COMPOSITOR="@compositor@"
+DEFAULT_SETTINGS="@defaultSettings@"
+
+# ─── seed settings.json ──────────────────────────────────────────────────
+# Resolves $XDG_CONFIG_HOME, falling back to $HOME/.config — kept in lockstep
+# with the compositor's config.base::resolve_path(). If the user passed
+# --config-file= explicitly, they manage the file themselves; skip seeding.
+if ! printf '%s\n' "$@" | grep -q -- '--config-file'; then
+    config_root="${XDG_CONFIG_HOME:-$HOME/.config}"
+    settings_dir="$config_root/y5.compositor"
+    settings_file="$settings_dir/settings.json"
+    if [ ! -f "$settings_file" ]; then
+        mkdir -p "$settings_dir"
+        cp "$DEFAULT_SETTINGS" "$settings_file"
+        chmod 600 "$settings_file"
+        echo "y5.compositor: seeded $settings_file (Vulkan defaults)" >&2
+    fi
+fi
+
+# ─── hand off ────────────────────────────────────────────────────────────
+exec "$COMPOSITOR" "$@"
